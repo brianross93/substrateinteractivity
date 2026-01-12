@@ -1,0 +1,17 @@
+FROM mambaorg/micromamba:1.5.8
+
+SHELL ["/bin/bash", "-lc"]
+
+# Create a conda env with the real Meep FDTD (Linux build) + plotting deps.
+RUN micromamba create -y -n meep -c conda-forge \
+    python=3.11 \
+    pymeep \
+    numpy \
+    matplotlib \
+    && micromamba clean -a -y
+
+WORKDIR /work
+
+# Default to showing Meep version; actual runs will override CMD.
+CMD ["micromamba", "run", "-n", "meep", "python", "-c", "import meep as mp; print('Meep OK:', mp.Simulation)"]
+
