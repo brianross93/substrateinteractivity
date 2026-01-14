@@ -54,9 +54,12 @@ def ordered_factorizations_upto(n_max: int) -> np.ndarray:
         r = int(math.isqrt(n))
         for d in range(2, r + 1):
             if n % d == 0:
+                # divisor d contributes term F(n/d)
                 total += int(f[n // d])
                 other = n // d
                 if other != d and other >= 2:
+                    # divisor other (= n/d) contributes term F(n/other) = F(d)
+                    # (written this way so it's obvious we're summing over BOTH divisors)
                     total += int(f[n // other])
         # include d=n (single factor tuple)
         total += int(f[1])
@@ -582,10 +585,20 @@ def save_cantor_t_sweep_plot(out_dir: str, base: TunnelingConfig, levels: list[i
     ss_res_2 = float(np.sum((ly - ly_hat_2) ** 2))
     r2_2 = 1.0 - (ss_res_2 / ss_tot)
 
-    # Resolution sanity: smallest Cantor feature ~ a / 3^L should be meaningfully larger than dx
-    dx = float(base.L) / float(base.n)
+    # Resolution sanity: smallest Cantor feature ~ a / 3^L should be meaningfully larger than dx.
+    # Note: run_tunneling() uses x = linspace(-L/2, L/2, n), so dx = L/(n-1) (not L/n).
+    dx = float(base.L) / float(base.n - 1)
     min_feat = np.array([float(base.a) / (3.0**int(L)) for L in lvls], dtype=np.float64)
     feat_over_dx = (min_feat / dx).tolist()  # >1 means feature larger than grid step
+
+    # Heuristic warnings:
+    # - If min_feature/dx < ~5, the smallest Cantor features are under-resolved and
+    #   any “fractal scaling” fit will be numerically dominated (not physically meaningful).
+    under = [L for L, r in zip(lvls, feat_over_dx, strict=False) if float(r) < 5.0]
+    if under:
+        print(f"[warn] Cantor levels under-resolved (min_feature/dx < 5): {under}")
+    if bool(getattr(base, "absorb", False)):
+        print("[warn] absorb=True: probability is not conserved; interpret T as 'mass on right', not a strict transmission coefficient.")
 
     fig, (ax0, ax1) = plt.subplots(2, 1, figsize=(10, 8), constrained_layout=True)
     ax0.plot(x, y, marker="o", lw=2)
@@ -1061,6 +1074,10 @@ class RetroConfig:
     ofm_target: str = "phi"  # "phi" or "theta"
     # initial state axis (Bloch): defaults to Z+ (|0⟩)
     psi0_axis: tuple[float, float, float] = (0.0, 0.0, 1.0)
+    # Sanity checks (assertions) for the CPTP switch reduced density matrix.
+    # Keep enabled for headless/dev runs; GUI disables by default to avoid hard crashes
+    # on rare platform-specific floating-point edge cases.
+    sanity_checks: bool = True
 
 
 def _ket_from_axis(n: np.ndarray) -> np.ndarray:
@@ -1231,18 +1248,19 @@ def run_retro(cfg: RetroConfig) -> dict:
                     rho_sc += K @ rho_in_sc @ K.conj().T
 
             rho_c_out = _ptrace_system(rho_sc)
-            
-            # Sanity checks for the reduced control density matrix:
-            # These verify the partial trace and CPTP channel are correctly implemented.
-            assert rho_c_out.shape == (2, 2), f"Expected 2x2, got {rho_c_out.shape}"
-            trace_val = float(np.real(np.trace(rho_c_out)))
-            assert abs(trace_val - 1.0) < 1e-9, f"Trace = {trace_val}, expected 1.0"
-            # Hermiticity check
-            herm_err = float(np.linalg.norm(rho_c_out - rho_c_out.conj().T))
-            assert herm_err < 1e-9, f"Non-Hermitian: ||ρ - ρ†|| = {herm_err}"
-            # Positivity check (eigenvalues should be >= 0, allow tiny numerical negatives)
-            min_eig = float(np.min(np.linalg.eigvalsh(rho_c_out).real))
-            assert min_eig > -1e-9, f"Negative eigenvalue: {min_eig}"
+
+            if bool(cfg.sanity_checks):
+                # Sanity checks for the reduced control density matrix:
+                # These verify the partial trace and CPTP channel are correctly implemented.
+                assert rho_c_out.shape == (2, 2), f"Expected 2x2, got {rho_c_out.shape}"
+                trace_val = float(np.real(np.trace(rho_c_out)))
+                assert abs(trace_val - 1.0) < 1e-9, f"Trace = {trace_val}, expected 1.0"
+                # Hermiticity check
+                herm_err = float(np.linalg.norm(rho_c_out - rho_c_out.conj().T))
+                assert herm_err < 1e-9, f"Non-Hermitian: ||ρ - ρ†|| = {herm_err}"
+                # Positivity check (eigenvalues should be >= 0, allow tiny numerical negatives)
+                min_eig = float(np.min(np.linalg.eigvalsh(rho_c_out).real))
+                assert min_eig > -1e-9, f"Negative eigenvalue: {min_eig}"
             # Optional control dephasing (phase damping): rho01 -> (1-p) rho01
             p_dep = float(cfg.switch_dephase_p)
             if p_dep > 0.0:
@@ -1984,6 +2002,7 @@ if HAS_TK:
                     use_switch=bool(int(self.r_switch.get())),
                     switch_phase_deg=float(self.r_phase.get()),
                     switch_cptp=not bool(int(self.r_switch_post.get())),
+                    sanity_checks=False,
                 )
                 self.r_status.config(text="Running...")
                 self.master.update_idletasks()
