@@ -1,0 +1,12 @@
+u,v,medium,weight
+Entrance,Descending Junction,stone,
+Descending Junction,Subterranean Chamber,stone,
+Descending Junction,Ascending Passage,stone,
+Ascending Passage,Grand Gallery,stone,
+Grand Gallery,Queens Chamber,stone,
+Grand Gallery,Kings Chamber,stone,
+Kings Chamber,Apex,stone,
+Kings Chamber,KC North Shaft,air_shaft,
+Kings Chamber,KC South Shaft,air_shaft,
+Queens Chamber,QC North Shaft,air_shaft,
+Queens Chamber,QC South Shaft,air_shaft,

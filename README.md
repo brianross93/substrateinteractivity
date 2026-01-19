@@ -158,11 +158,53 @@ The Kuramoto sim supports alternative coupling topologies in code via `KuramotoC
 - `ofm`: OFM-weighted dense coupling (default)
 - `torus`: nearest-neighbor coupling on a periodic 2D torus grid
 - `metatron`: a simple 13-node “Metatron-like” graph (center + ring + chords)
+- `pyramid`: Great Pyramid-inspired internal topology (approximate chambers + shafts)
 
 You can also set topology in headless mode:
 
 ```powershell
 py .\app.py --nogui --mode kuramoto --out outputs --kuramoto-topology torus --torus-m 6
+```
+
+Pyramid example (approximate geometry; distances scaled in meters):
+
+```powershell
+py .\app.py --nogui --mode kuramoto --out outputs --kuramoto-topology pyramid --kuramoto-j 1.0 --pyramid-scale-m 35 --pyramid-shaft-weight 1.15
+```
+
+Custom pyramid geometry (CSV-driven):
+
+- Nodes CSV columns: `name,x,y,z`
+- Edges CSV columns: `u,v,medium,weight`
+  - `medium` is optional and uses `--pyramid-medium-weights`
+  - `weight` is optional; if omitted, distance-based weight is used
+
+```powershell
+py .\app.py --nogui --mode kuramoto --out outputs --kuramoto-topology pyramid `
+  --pyramid-nodes-csv .\inputs\pyramid_nodes.csv `
+  --pyramid-edges-csv .\inputs\pyramid_edges.csv `
+  --pyramid-medium-weights "stone=1.0,air_shaft=1.2,water=1.1,granite=1.05"
+```
+
+Second-order (inertia) Kuramoto:
+
+```powershell
+py .\app.py --nogui --mode kuramoto --out outputs --kuramoto-topology pyramid `
+  --kuramoto-model second --kuramoto-mass 2.0 --kuramoto-damping 0.8
+```
+
+Longer run + finer sampling (useful for breathing analysis):
+
+```powershell
+py .\app.py --nogui --mode kuramoto --out outputs --kuramoto-topology pyramid `
+  --kuramoto-t-end 60 --kuramoto-dt 0.05
+```
+
+Shaft-weight sweep (writes CSV + PNG):
+
+```powershell
+py .\app.py --nogui --mode kuramoto --out outputs --kuramoto-topology pyramid `
+  --pyramid-shaft-sweep "0.8,0.9,1.0,1.1,1.2,1.3,1.4"
 ```
 
 ## Notes
@@ -282,3 +324,29 @@ docker run --rm -v ${PWD}:/work -w /work qinvestigation-meep micromamba run -n m
 - The GUI uses **Tkinter** (bundled with standard Python on Windows) and embeds **Matplotlib** plots.
 - The OFM here is a practical approximation based on **ordered factorizations** \(F(n)\), used to build distances \(d(i,j)=|F(i)-F(j)|\) and couplings \(J_{ij}=J/(1+d)\), per the spec’s suggested approach.
 
+
+## Hardware: Substrate Field Transceiver
+
+A physical device for generating OFM-derived multi-frequency magnetic fields. Based on the theory that phase-coherent harmonic field patterns may couple to quantum/consciousness substrates.
+
+### Files
+
+- **`substrate_transceiver_build_guide.md`** - Full build documentation
+- **`substrate_transceiver.ino`** - Arduino firmware
+- **`SHOPPING_LIST.txt`** - Parts list with links/prices
+- **`QUICKSTART.md`** - 1-page getting started guide
+
+### Quick Overview
+
+**Hardware:** Arduino Nano + AD9833 DDS modules + audio amplifier + Helmholtz coils
+
+**Cost:** ~$60-150 depending on options
+
+**Key Features:**
+- Phase-coherent multi-frequency generation (all derived from same clock)
+- OFM-derived harmonic ratios (prime factorization structure)
+- Preset frequencies: OR timescale (6.25 Hz), Schumann (7.83 Hz), Theta (8 Hz), Gamma (40 Hz), Bandyopadhyay resonance (111 Hz)
+- Sweep and pulse modes for frequency search
+- Serial control interface
+
+**Theory:** If nuclear spin affects consciousness (xenon isotope evidence), and nuclear spin couples to magnetic fields (NMR principle), then tuned magnetic fields should couple to consciousness-relevant processes. Multi-frequency patterns following number-theoretic structure (OFM) may create resonance with microtubule/substrate geometry.

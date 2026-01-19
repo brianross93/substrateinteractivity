@@ -5,6 +5,7 @@ import random
 import sys
 import csv
 from dataclasses import dataclass
+from typing import Optional
 
 import matplotlib
 
@@ -168,8 +169,16 @@ class KuramotoConfig:
     t_end: float = 20.0
     dt: float = 0.05
     seed: int = 1
-    topology: str = "ofm"  # ofm | torus | metatron
+    topology: str = "ofm"  # ofm | torus | metatron | pyramid
     torus_m: int = 5  # used when topology=torus, N = m*m
+    pyramid_scale_m: float = 35.0  # distance scaling for pyramid graph coupling
+    pyramid_shaft_weight: float = 1.15  # default multiplier for air-shaft edges
+    pyramid_medium_weights: str = "stone=1.0,air_shaft=1.15,water=1.1,granite=1.05,limestone=0.95"
+    pyramid_nodes_csv: Optional[str] = None
+    pyramid_edges_csv: Optional[str] = None
+    model: str = "first"  # first | second (inertia)
+    mass: float = 1.0  # only used for model=second
+    damping: float = 1.0  # only used for model=second
     ofm_threshold: float = 0.0  # if >0, only keep edges with weight > threshold (0 = no threshold)
     ofm_exponent: float = 1.0  # distance falloff exponent: J / (1 + d)^alpha (1.0 = default)
 
@@ -220,6 +229,163 @@ def build_metatron_like_graph() -> nx.Graph:
     return g
 
 
+def _edge_weight_from_distance(dist_m: float, scale_m: float) -> float:
+    # Smoothly decays with distance; scale_m tunes how quickly links fade.
+    scale_m = max(float(scale_m), 1e-6)
+    return 1.0 / (1.0 + (float(dist_m) / scale_m))
+
+
+def _parse_medium_weights(value: Optional[str]) -> dict:
+    weights = {}
+    if not value:
+        return weights
+    for token in str(value).split(","):
+        item = token.strip()
+        if not item:
+            continue
+        if "=" not in item:
+            raise ValueError(f"Invalid medium weight: '{item}'. Use name=value.")
+        name, w = item.split("=", 1)
+        weights[name.strip().lower()] = float(w)
+    return weights
+
+
+def _format_medium_weights(weights: dict) -> str:
+    if not weights:
+        return ""
+    parts = [f"{k}={weights[k]:.6g}" for k in sorted(weights.keys())]
+    return ",".join(parts)
+
+
+def _parse_float_list(value: Optional[str]) -> list[float]:
+    if value is None:
+        return []
+    items = []
+    for token in str(value).split(","):
+        item = token.strip()
+        if not item:
+            continue
+        items.append(float(item))
+    return items
+
+
+def _load_pyramid_csv(nodes_csv: str, edges_csv: str) -> tuple[dict, list[tuple[str, str, Optional[str], Optional[float]]]]:
+    nodes = {}
+    with open(nodes_csv, newline="", encoding="utf-8") as f:
+        reader = csv.DictReader(f)
+        for row in reader:
+            name = str(row.get("name", "")).strip()
+            if not name:
+                continue
+            x = float(row.get("x", 0.0))
+            y = float(row.get("y", 0.0))
+            z = float(row.get("z", 0.0))
+            nodes[name] = (x, y, z)
+    edges = []
+    with open(edges_csv, newline="", encoding="utf-8") as f:
+        reader = csv.DictReader(f)
+        for row in reader:
+            u = str(row.get("u", "")).strip()
+            v = str(row.get("v", "")).strip()
+            if not u or not v:
+                continue
+            medium = str(row.get("medium", "")).strip() or None
+            w_raw = str(row.get("weight", "")).strip()
+            weight = float(w_raw) if w_raw else None
+            edges.append((u, v, medium, weight))
+    return nodes, edges
+
+
+def build_pyramid_graph_from_csv(nodes_csv: str, edges_csv: str, scale_m: float, medium_weights: dict) -> nx.Graph:
+    nodes, edges = _load_pyramid_csv(nodes_csv, edges_csv)
+    if not nodes:
+        raise ValueError("Pyramid CSV: no nodes loaded.")
+    g = nx.Graph()
+    for name, pos in nodes.items():
+        g.add_node(name, pos=pos)
+
+    def dist(a: str, b: str) -> float:
+        ax, ay, az = nodes[a]
+        bx, by, bz = nodes[b]
+        return math.sqrt((ax - bx) ** 2 + (ay - by) ** 2 + (az - bz) ** 2)
+
+    for u, v, medium, weight in edges:
+        if u not in nodes or v not in nodes:
+            continue
+        w = float(weight) if weight is not None else _edge_weight_from_distance(dist(u, v), scale_m)
+        if medium:
+            w *= float(medium_weights.get(str(medium).lower(), 1.0))
+        g.add_edge(u, v, weight=w, medium=medium)
+    return g
+
+
+def build_giza_pyramid_graph(scale_m: float, shaft_weight: float, medium_weights: dict) -> nx.Graph:
+    """
+    Approximate Great Pyramid internal topology for Kuramoto coupling.
+
+    Coordinates are in meters with (0,0,0) at the pyramid base center.
+    Values are approximate, intended for geometry-informed weighting rather than
+    architectural precision.
+    """
+    # Approximate global dimensions
+    base_half = 115.17  # half of ~230.34 m base
+    height = 146.6
+
+    # Key internal locations (approximate)
+    nodes = {
+        "Entrance": (0.0, base_half, 18.0),
+        "Descending Junction": (0.0, 50.0, 15.0),
+        "Subterranean Chamber": (0.0, 0.0, -30.0),
+        "Ascending Passage": (0.0, 40.0, 20.0),
+        "Grand Gallery": (0.0, 30.0, 35.0),
+        "Queens Chamber": (0.0, 20.0, 20.5),
+        "Kings Chamber": (0.0, 0.0, 43.0),
+        "Apex": (0.0, 0.0, height),
+        "KC North Shaft": (0.0, base_half, 43.0),
+        "KC South Shaft": (0.0, -base_half, 43.0),
+        "QC North Shaft": (0.0, base_half, 20.5),
+        "QC South Shaft": (0.0, -base_half, 20.5),
+    }
+
+    # Physical connectivity (passages + shafts)
+    tunnel_edges = [
+        ("Entrance", "Descending Junction"),
+        ("Descending Junction", "Subterranean Chamber"),
+        ("Descending Junction", "Ascending Passage"),
+        ("Ascending Passage", "Grand Gallery"),
+        ("Grand Gallery", "Queens Chamber"),
+        ("Grand Gallery", "Kings Chamber"),
+        ("Kings Chamber", "Apex"),
+    ]
+    shaft_edges = [
+        ("Kings Chamber", "KC North Shaft"),
+        ("Kings Chamber", "KC South Shaft"),
+        ("Queens Chamber", "QC North Shaft"),
+        ("Queens Chamber", "QC South Shaft"),
+    ]
+
+    g = nx.Graph()
+    for name, pos in nodes.items():
+        g.add_node(name, pos=pos)
+
+    def dist(a: str, b: str) -> float:
+        ax, ay, az = nodes[a]
+        bx, by, bz = nodes[b]
+        return math.sqrt((ax - bx) ** 2 + (ay - by) ** 2 + (az - bz) ** 2)
+
+    for u, v in tunnel_edges:
+        w = _edge_weight_from_distance(dist(u, v), scale_m)
+        w *= float(medium_weights.get("stone", 1.0))
+        g.add_edge(u, v, weight=w, medium="stone")
+
+    for u, v in shaft_edges:
+        w = _edge_weight_from_distance(dist(u, v), scale_m)
+        w *= float(medium_weights.get("air_shaft", float(shaft_weight)))
+        g.add_edge(u, v, weight=w, medium="air_shaft")
+
+    return g
+
+
 def build_kuramoto_coupling(cfg: KuramotoConfig) -> tuple[np.ndarray, np.ndarray, nx.Graph]:
     topo = str(cfg.topology).lower().strip()
     if topo == "ofm":
@@ -246,7 +412,47 @@ def build_kuramoto_coupling(cfg: KuramotoConfig) -> tuple[np.ndarray, np.ndarray
         f = np.zeros(len(g.nodes()) + 1, dtype=np.int64)
         return f, k, g
 
-    raise ValueError("Unknown topology. Use: ofm | torus | metatron")
+    if topo == "pyramid":
+        medium_weights = _parse_medium_weights(cfg.pyramid_medium_weights)
+        if cfg.pyramid_nodes_csv and cfg.pyramid_edges_csv:
+            g = build_pyramid_graph_from_csv(cfg.pyramid_nodes_csv, cfg.pyramid_edges_csv, cfg.pyramid_scale_m, medium_weights)
+        else:
+            g = build_giza_pyramid_graph(cfg.pyramid_scale_m, cfg.pyramid_shaft_weight, medium_weights)
+        k = build_graph_coupling_matrix(g, cfg.j_strength)
+        f = np.zeros(len(g.nodes()) + 1, dtype=np.int64)
+        return f, k, g
+
+    raise ValueError("Unknown topology. Use: ofm | torus | metatron | pyramid")
+
+
+def run_kuramoto_second_order(theta0: np.ndarray, omega0: np.ndarray, k: np.ndarray, cfg: KuramotoConfig) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+    n = k.shape[0]
+    mass = max(float(cfg.mass), 1e-6)
+    damping = float(cfg.damping)
+    t_eval = np.arange(0.0, cfg.t_end + cfg.dt, cfg.dt)
+
+    def rhs(_t: float, y: np.ndarray) -> np.ndarray:
+        theta = y[:n]
+        vel = y[n:]
+        diffs = theta[None, :] - theta[:, None]
+        coupling = np.sum(k * np.sin(diffs), axis=1)
+        accel = (omega0 + coupling - damping * vel) / mass
+        return np.concatenate([vel, accel])
+
+    y0 = np.concatenate([theta0, omega0])
+    sol = solve_ivp(
+        fun=rhs,
+        t_span=(0.0, cfg.t_end),
+        y0=y0,
+        t_eval=t_eval,
+        method="RK45",
+        rtol=1e-6,
+        atol=1e-8,
+    )
+    theta_t = sol.y[:n]
+    vel_t = sol.y[n:]
+    r_t = kuramoto_order_parameter(theta_t)
+    return sol.t, theta_t, vel_t, r_t
 
 
 def run_kuramoto(cfg: KuramotoConfig) -> dict:
@@ -257,40 +463,85 @@ def run_kuramoto(cfg: KuramotoConfig) -> dict:
     theta0 = rng.uniform(0.0, 2.0 * np.pi, size=(n,))
     omega = rng.normal(cfg.omega_mean, cfg.omega_std, size=(n,))
 
-    t_eval = np.arange(0.0, cfg.t_end + cfg.dt, cfg.dt)
-    # ODE solver tolerances:
-    # ----------------------
-    # rtol=1e-6, atol=1e-8 are conservative choices for phase dynamics.
-    # - Phases θ are O(1) to O(10) over typical runs, so atol=1e-8 ensures
-    #   absolute errors are negligible compared to phase wrapping (2π).
-    # - rtol=1e-6 keeps relative errors below 0.0001%, well within visual
-    #   and statistical accuracy for order parameter r(t).
-    # - RK45 (adaptive Runge-Kutta) is appropriate for smooth, non-stiff ODEs.
-    #
-    # These tolerances validated by comparing r_final across rtol=1e-4 to 1e-8:
-    # variations are <0.001, confirming convergence.
-    sol = solve_ivp(
-        fun=lambda t, y: kuramoto_rhs(t, y, omega=omega, k=k),
-        t_span=(0.0, cfg.t_end),
-        y0=theta0,
-        t_eval=t_eval,
-        method="RK45",
-        rtol=1e-6,
-        atol=1e-8,
-    )
-    theta_t = sol.y  # (N, T)
-    r_t = kuramoto_order_parameter(theta_t)
+    if str(cfg.model).lower().strip() == "second":
+        t, theta_t, vel_t, r_t = run_kuramoto_second_order(theta0, omega, k, cfg)
+        omega_t = vel_t
+    else:
+        t_eval = np.arange(0.0, cfg.t_end + cfg.dt, cfg.dt)
+        # ODE solver tolerances:
+        # ----------------------
+        # rtol=1e-6, atol=1e-8 are conservative choices for phase dynamics.
+        # - Phases θ are O(1) to O(10) over typical runs, so atol=1e-8 ensures
+        #   absolute errors are negligible compared to phase wrapping (2π).
+        # - rtol=1e-6 keeps relative errors below 0.0001%, well within visual
+        #   and statistical accuracy for order parameter r(t).
+        # - RK45 (adaptive Runge-Kutta) is appropriate for smooth, non-stiff ODEs.
+        #
+        # These tolerances validated by comparing r_final across rtol=1e-4 to 1e-8:
+        # variations are <0.001, confirming convergence.
+        sol = solve_ivp(
+            fun=lambda t, y: kuramoto_rhs(t, y, omega=omega, k=k),
+            t_span=(0.0, cfg.t_end),
+            y0=theta0,
+            t_eval=t_eval,
+            method="RK45",
+            rtol=1e-6,
+            atol=1e-8,
+        )
+        t = sol.t
+        theta_t = sol.y  # (N, T)
+        r_t = kuramoto_order_parameter(theta_t)
+        omega_t = None
 
     return {
-        "t": sol.t,
+        "t": t,
         "theta": theta_t,
         "r": r_t,
         "omega": omega,
+        "omega_t": omega_t,
         "F": f,
         "K": k,
         "graph": g,
         "topology": str(cfg.topology),
+        "model": str(cfg.model),
     }
+
+
+def save_kuramoto_shaft_weight_sweep(out_dir: str, cfg: KuramotoConfig, weights: list[float]) -> str:
+    if str(cfg.topology).lower().strip() != "pyramid":
+        raise ValueError("Shaft-weight sweep is only supported for topology=pyramid.")
+    if not weights:
+        raise ValueError("Shaft-weight sweep requires at least one weight.")
+
+    results = []
+    for w in weights:
+        base = cfg.__dict__
+        medium = _parse_medium_weights(cfg.pyramid_medium_weights)
+        medium["air_shaft"] = float(w)
+        sweep_cfg = KuramotoConfig(**{**base, "pyramid_medium_weights": _format_medium_weights(medium)})
+        r_final = save_kuramoto_plot(out_dir, sweep_cfg)
+        results.append((float(w), float(r_final)))
+
+    csv_path = os.path.join(out_dir, "kuramoto_pyramid_shaft_sweep.csv")
+    with open(csv_path, "w", newline="", encoding="utf-8") as f:
+        w = csv.writer(f)
+        w.writerow(["air_shaft_weight", "r_final"])
+        for weight, r_final in results:
+            w.writerow([weight, r_final])
+
+    fig, ax = plt.subplots(figsize=(8, 4))
+    xs = [r[0] for r in results]
+    ys = [r[1] for r in results]
+    ax.plot(xs, ys, marker="o", lw=2)
+    ax.set_xlabel("air_shaft_weight")
+    ax.set_ylabel("r_final")
+    ax.set_title("Kuramoto r_final vs air_shaft_weight (pyramid)")
+    ax.grid(True, alpha=0.3)
+    fig.tight_layout()
+    plot_path = os.path.join(out_dir, "kuramoto_pyramid_shaft_sweep.png")
+    fig.savefig(plot_path, dpi=150)
+    plt.close(fig)
+    return csv_path
 
 
 def save_kuramoto_animation(out_dir: str, cfg: KuramotoConfig, filename: str = "kuramoto.gif") -> str:
@@ -658,6 +909,11 @@ def headless_main(mode: str, out_dir: str, barrier: str) -> int:
         kcfg = globals().get("_KURAMOTO_HEADLESS_CFG", KuramotoConfig())
         final_r = save_kuramoto_plot(out_dir, kcfg)
         print(f"[kuramoto] final r = {final_r:.3f}  (see {os.path.join(out_dir, 'kuramoto.png')})")
+        extra = globals().get("_KURAMOTO_SWEEP", {"pyramid_shaft_sweep": None})
+        sweep_vals = _parse_float_list(extra.get("pyramid_shaft_sweep"))
+        if sweep_vals:
+            csv_path = save_kuramoto_shaft_weight_sweep(out_dir, kcfg, sweep_vals)
+            print(f"[kuramoto] wrote {csv_path} and kuramoto_pyramid_shaft_sweep.png")
     if mode in ("kuramoto_anim",):
         kcfg = globals().get("_KURAMOTO_HEADLESS_CFG", KuramotoConfig())
         out_path = save_kuramoto_animation(out_dir, kcfg)
@@ -2100,11 +2356,23 @@ def main() -> int:
     parser.add_argument("--retro-ofm-strength-deg", type=float, default=0.0, help="Retro OFM: max delta in degrees (scaled by OFM).")
     parser.add_argument("--retro-ofm-target", choices=["phi", "theta"], default="phi", help="Retro OFM: apply modulation to phi or theta.")
     # Kuramoto (headless)
-    parser.add_argument("--kuramoto-topology", choices=["ofm", "torus", "metatron"], default=None, help="Kuramoto topology.")
+    parser.add_argument("--kuramoto-topology", choices=["ofm", "torus", "metatron", "pyramid"], default=None, help="Kuramoto topology.")
     parser.add_argument("--torus-m", type=int, default=None, help="Kuramoto: torus grid size m (N=m*m).")
     parser.add_argument("--kuramoto-n", type=int, default=None, help="Kuramoto: N (only used for topology=ofm).")
     parser.add_argument("--kuramoto-j", type=float, default=None, help="Kuramoto: coupling strength J.")
     parser.add_argument("--kuramoto-omega-std", type=float, default=None, help="Kuramoto: omega_std (spread).")
+    parser.add_argument("--kuramoto-t-end", type=float, default=None, help="Kuramoto: simulation end time.")
+    parser.add_argument("--kuramoto-dt", type=float, default=None, help="Kuramoto: output dt.")
+    parser.add_argument("--kuramoto-seed", type=int, default=None, help="Kuramoto: RNG seed.")
+    parser.add_argument("--pyramid-scale-m", type=float, default=None, help="Kuramoto: pyramid distance scale (meters).")
+    parser.add_argument("--pyramid-shaft-weight", type=float, default=None, help="Kuramoto: weight multiplier for pyramid shaft edges.")
+    parser.add_argument("--pyramid-medium-weights", type=str, default=None, help="Kuramoto: medium weights (name=value,comma-separated).")
+    parser.add_argument("--pyramid-nodes-csv", type=str, default=None, help="Kuramoto: pyramid nodes CSV (name,x,y,z).")
+    parser.add_argument("--pyramid-edges-csv", type=str, default=None, help="Kuramoto: pyramid edges CSV (u,v,medium,weight).")
+    parser.add_argument("--kuramoto-model", choices=["first", "second"], default=None, help="Kuramoto: first-order or inertia model.")
+    parser.add_argument("--kuramoto-mass", type=float, default=None, help="Kuramoto: inertia mass (second-order).")
+    parser.add_argument("--kuramoto-damping", type=float, default=None, help="Kuramoto: damping gamma (second-order).")
+    parser.add_argument("--pyramid-shaft-sweep", type=str, default=None, help="Kuramoto: sweep air_shaft weights (comma-separated).")
     # CHSH (headless)
     parser.add_argument("--chsh-noise-sweep", action="store_true", help="CHSH: sweep noise values and write chsh_noise_sweep.png.")
     parser.add_argument("--chsh-ofm-n", type=int, default=20, help="CHSH: OFM N for scaling.")
@@ -2170,8 +2438,32 @@ def main() -> int:
                 kcfg = KuramotoConfig(**{**kcfg.__dict__, "j_strength": float(args.kuramoto_j)})
             if args.kuramoto_omega_std is not None:
                 kcfg = KuramotoConfig(**{**kcfg.__dict__, "omega_std": float(args.kuramoto_omega_std)})
+            if args.kuramoto_t_end is not None:
+                kcfg = KuramotoConfig(**{**kcfg.__dict__, "t_end": float(args.kuramoto_t_end)})
+            if args.kuramoto_dt is not None:
+                kcfg = KuramotoConfig(**{**kcfg.__dict__, "dt": float(args.kuramoto_dt)})
+            if args.kuramoto_seed is not None:
+                kcfg = KuramotoConfig(**{**kcfg.__dict__, "seed": int(args.kuramoto_seed)})
+            if args.pyramid_scale_m is not None:
+                kcfg = KuramotoConfig(**{**kcfg.__dict__, "pyramid_scale_m": float(args.pyramid_scale_m)})
+            if args.pyramid_shaft_weight is not None:
+                kcfg = KuramotoConfig(**{**kcfg.__dict__, "pyramid_shaft_weight": float(args.pyramid_shaft_weight)})
+            if args.pyramid_medium_weights is not None:
+                kcfg = KuramotoConfig(**{**kcfg.__dict__, "pyramid_medium_weights": str(args.pyramid_medium_weights)})
+            if args.pyramid_nodes_csv is not None:
+                kcfg = KuramotoConfig(**{**kcfg.__dict__, "pyramid_nodes_csv": str(args.pyramid_nodes_csv)})
+            if args.pyramid_edges_csv is not None:
+                kcfg = KuramotoConfig(**{**kcfg.__dict__, "pyramid_edges_csv": str(args.pyramid_edges_csv)})
+            if args.kuramoto_model is not None:
+                kcfg = KuramotoConfig(**{**kcfg.__dict__, "model": str(args.kuramoto_model)})
+            if args.kuramoto_mass is not None:
+                kcfg = KuramotoConfig(**{**kcfg.__dict__, "mass": float(args.kuramoto_mass)})
+            if args.kuramoto_damping is not None:
+                kcfg = KuramotoConfig(**{**kcfg.__dict__, "damping": float(args.kuramoto_damping)})
             global _KURAMOTO_HEADLESS_CFG  # noqa: PLW0603
             _KURAMOTO_HEADLESS_CFG = kcfg
+            global _KURAMOTO_SWEEP  # noqa: PLW0603
+            _KURAMOTO_SWEEP = {"pyramid_shaft_sweep": args.pyramid_shaft_sweep}
 
         if args.mode in ("chsh", "all"):
             ccfg = CHSHConfig(n_ofm=int(args.chsh_ofm_n), fractal_noise=0.0, seed=1)

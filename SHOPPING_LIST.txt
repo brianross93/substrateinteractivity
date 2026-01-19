@@ -1,0 +1,136 @@
+SUBSTRATE FIELD TRANSCEIVER - SHOPPING LIST
+============================================
+
+Copy-paste friendly for ordering. Estimated total: $100-150
+
+
+CORE ELECTRONICS (Required)
+---------------------------
+
+1x Arduino Nano (or clone)
+   Amazon: "Arduino Nano V3.0" - ~$15
+   AliExpress: "Nano V3 ATmega328P" - ~$3-5
+   
+2x AD9833 DDS Signal Generator Module  
+   AliExpress: "AD9833 Programmable Signal Generator" - ~$3 each
+   Search: "AD9833 module"
+   
+1x TDA7297 Audio Amplifier Module (15W x 2)
+   Amazon: "TDA7297 Amplifier Board" - ~$6
+   AliExpress: "TDA7297 dual channel 15W" - ~$3
+
+1x 12V 2A DC Power Supply
+   Amazon: "12V 2A Power Adapter 5.5x2.1mm" - ~$8
+   
+1x Solderless Breadboard (830 points)
+   Amazon: "Breadboard 830 tie points" - ~$5
+
+1x Jumper Wire Kit (M-M, M-F, F-F)
+   Amazon: "Jumper wire kit arduino" - ~$6
+
+
+HELMHOLTZ COILS (DIY)
+---------------------
+
+1x Magnet Wire 24 AWG, 100ft minimum
+   Amazon: "Magnet wire 24 gauge 200ft" - ~$12
+   (Need ~100 turns x 2 coils x ~0.5m per turn = ~100m total)
+   
+2x PVC Coupling 6" diameter (or similar ~15cm diameter form)
+   Home Depot / Lowes: "6 inch PVC coupling" - ~$5 each
+   Alternative: 6" embroidery hoops, plastic containers
+   
+Wood/PVC for mounting frame
+   Scrap wood or 1/2" PVC pipe + fittings - ~$10
+
+
+OPTIONAL BUT RECOMMENDED
+------------------------
+
+2x 10K Potentiometer (linear)
+   Amazon: "10K potentiometer linear" - ~$5 for 5-pack
+   (For manual frequency + amplitude control)
+
+1x HMC5883L Magnetometer Module
+   Amazon: "HMC5883L GY-271" - ~$5
+   (Verify your field is working)
+
+1x SSD1306 OLED Display 0.96" I2C
+   Amazon: "SSD1306 OLED I2C arduino" - ~$6
+   (See current frequency)
+
+1x Oscilloscope or Multimeter with frequency
+   (For debugging - borrow if you don't have)
+
+
+DETECTION OPTIONS (Choose based on experiment)
+----------------------------------------------
+
+Option A: RNG-based detection
+   1x OneRNG hardware random number generator - ~$50
+   https://onerng.info/
+   
+Option B: Biological detection
+   Seeds/plants + growth measurement
+   (Free if you have seeds)
+
+Option C: EEG-based (human subject)
+   1x Muse 2 Headband - ~$250
+   Or cheaper: "Mindflex EEG hack" - ~$30 used
+
+
+TOOLS NEEDED (probably already have)
+------------------------------------
+
+- Soldering iron + solder
+- Wire strippers
+- Screwdriver set
+- Hot glue gun (optional, for securing coils)
+- Multimeter
+
+
+QUICK ORDER (Amazon only, ~$60):
+--------------------------------
+
+Arduino Nano clone ................ $12
+AD9833 module (2-pack) ............ $10  
+TDA7297 amp board ................. $8
+12V 2A power supply ............... $10
+Breadboard + jumper wires ......... $10
+24AWG magnet wire 200ft ........... $12
+                                    ----
+                              Total ~$60
+
++ PVC/wood from hardware store .... ~$15
+
+
+ALIEXPRESS BUDGET VERSION (~$35):
+---------------------------------
+
+Arduino Nano clone ................ $3
+AD9833 x2 ......................... $6
+TDA7297 ........................... $3
+12V adapter ....................... $5
+Breadboard + wires ................ $4
+Magnet wire ....................... $8
+Shipping .......................... $0 (usually free)
+                                    ----
+                              Total ~$30
+
+Wait time: 2-4 weeks
+
+
+NOTES:
+------
+
+1. AD9833 modules sometimes come with different pinouts.
+   Verify: VCC, GND, SCLK, SDATA, FSYNC are the pins you need.
+
+2. Magnet wire has enamel coating - must be scraped/sanded 
+   at connection points to make electrical contact.
+
+3. The 6" diameter isn't critical - anything 12-20cm works.
+   Just make coil separation = coil radius for Helmholtz.
+
+4. If TDA7297 isn't available, any 10-20W audio amp works.
+   Car audio amps, old stereo receiver, etc.
