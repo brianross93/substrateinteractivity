@@ -185,6 +185,7 @@ class KuramotoConfig:
 
 def build_graph_coupling_matrix(g: nx.Graph, j_strength: float) -> np.ndarray:
     nodes = list(g.nodes())
+    g.graph["node_order"] = nodes
     idx = {n: i for i, n in enumerate(nodes)}
     n = len(nodes)
     k = np.zeros((n, n), dtype=np.float64)
@@ -267,6 +268,25 @@ def _parse_float_list(value: Optional[str]) -> list[float]:
             continue
         items.append(float(item))
     return items
+
+
+def _parse_phase_pairs(value: Optional[str]) -> list[tuple[int, int]]:
+    if value is None:
+        return []
+    pairs = []
+    for token in str(value).split(","):
+        item = token.strip()
+        if not item:
+            continue
+        if "-" not in item:
+            raise ValueError(f"Invalid phase pair '{item}'. Use i-j with 1-based indices.")
+        left, right = item.split("-", 1)
+        i = int(left.strip())
+        j = int(right.strip())
+        if i < 1 or j < 1:
+            raise ValueError("Phase pair indices must be >= 1.")
+        pairs.append((i, j))
+    return pairs
 
 
 def _load_pyramid_csv(nodes_csv: str, edges_csv: str) -> tuple[dict, list[tuple[str, str, Optional[str], Optional[float]]]]:
@@ -726,13 +746,15 @@ def _ensure_dir(path: str) -> None:
     os.makedirs(path, exist_ok=True)
 
 
-def save_kuramoto_plot(out_dir: str, cfg: KuramotoConfig) -> float:
+def save_kuramoto_plot(out_dir: str, cfg: KuramotoConfig, extra: Optional[dict] = None) -> float:
+    extra = extra or {}
     out = run_kuramoto(cfg)
     t = out["t"]
     r = out["r"]
     theta = out["theta"]
     theta_final = np.mod(theta[:, -1], 2.0 * np.pi)
     n = theta.shape[0]
+    g = out.get("graph")
 
     fig, (ax_r, ax_phase) = plt.subplots(2, 1, figsize=(10, 7), constrained_layout=True)
     ax_r.plot(t, r, lw=2)
@@ -751,6 +773,78 @@ def save_kuramoto_plot(out_dir: str, cfg: KuramotoConfig) -> float:
 
     fig.savefig(os.path.join(out_dir, "kuramoto.png"), dpi=160)
     plt.close(fig)
+
+    node_order = []
+    if isinstance(g, nx.Graph):
+        node_order = list(g.graph.get("node_order", []))
+    if node_order:
+        map_path = os.path.join(out_dir, "kuramoto_node_map.csv")
+        with open(map_path, "w", newline="", encoding="utf-8") as f:
+            w = csv.writer(f)
+            w.writerow(["index", "node"])
+            for i, node in enumerate(node_order, start=1):
+                w.writerow([i, node])
+
+    if bool(extra.get("label_nodes")) and node_order:
+        fig2, ax2 = plt.subplots(figsize=(10, 4))
+        x = np.arange(1, n + 1)
+        ax2.scatter(x, theta_final, s=20)
+        for i, node in enumerate(node_order, start=1):
+            ax2.annotate(str(node), (i, theta_final[i - 1]), xytext=(4, 4), textcoords="offset points", fontsize=8)
+        ax2.set_title("Final phases (labeled)")
+        ax2.set_xlabel("node index")
+        ax2.set_ylabel("theta mod 2π")
+        ax2.set_ylim(0.0, 2.0 * np.pi)
+        ax2.grid(True, alpha=0.3)
+        fig2.tight_layout()
+        fig2.savefig(os.path.join(out_dir, "kuramoto_phases_labeled.png"), dpi=160)
+        plt.close(fig2)
+
+    if bool(extra.get("fft")):
+        dt = float(t[1] - t[0]) if len(t) > 1 else 1.0
+        r_centered = r - float(np.mean(r))
+        freqs = np.fft.rfftfreq(len(r_centered), d=dt)
+        spectrum = np.abs(np.fft.rfft(r_centered))
+        csv_path = os.path.join(out_dir, "kuramoto_r_fft.csv")
+        with open(csv_path, "w", newline="", encoding="utf-8") as f:
+            w = csv.writer(f)
+            w.writerow(["freq", "amplitude"])
+            for fval, amp in zip(freqs, spectrum, strict=False):
+                w.writerow([float(fval), float(amp)])
+        fig3, ax3 = plt.subplots(figsize=(10, 4))
+        ax3.plot(freqs, spectrum, lw=2)
+        ax3.set_title("FFT of r(t) (detrended)")
+        ax3.set_xlabel("frequency (1/time unit)")
+        ax3.set_ylabel("amplitude")
+        ax3.grid(True, alpha=0.3)
+        fig3.tight_layout()
+        fig3.savefig(os.path.join(out_dir, "kuramoto_r_fft.png"), dpi=160)
+        plt.close(fig3)
+
+    phase_pairs = _parse_phase_pairs(extra.get("phase_pairs"))
+    if phase_pairs:
+        cols = 2
+        rows = int(math.ceil(len(phase_pairs) / cols))
+        fig4, axes = plt.subplots(rows, cols, figsize=(10, 4 * rows), constrained_layout=True)
+        if not isinstance(axes, np.ndarray):
+            axes = np.array([axes])
+        axes = axes.flatten()
+        for ax, (i, j) in zip(axes, phase_pairs, strict=False):
+            if i > n or j > n:
+                ax.set_visible(False)
+                continue
+            th_i = np.mod(theta[i - 1, :], 2.0 * np.pi)
+            th_j = np.mod(theta[j - 1, :], 2.0 * np.pi)
+            ax.plot(th_i, th_j, lw=1.2)
+            ax.set_title(f"Phase portrait: {i} vs {j}")
+            ax.set_xlabel(f"theta[{i}]")
+            ax.set_ylabel(f"theta[{j}]")
+            ax.grid(True, alpha=0.3)
+        for ax in axes[len(phase_pairs) :]:
+            ax.set_visible(False)
+        fig4.savefig(os.path.join(out_dir, "kuramoto_phase_portrait.png"), dpi=160)
+        plt.close(fig4)
+
     return float(r[-1])
 
 
@@ -907,7 +1001,8 @@ def headless_main(mode: str, out_dir: str, barrier: str) -> int:
 
     if mode in ("kuramoto", "both", "all"):
         kcfg = globals().get("_KURAMOTO_HEADLESS_CFG", KuramotoConfig())
-        final_r = save_kuramoto_plot(out_dir, kcfg)
+        kextra = globals().get("_KURAMOTO_EXTRA", {})
+        final_r = save_kuramoto_plot(out_dir, kcfg, extra=kextra)
         print(f"[kuramoto] final r = {final_r:.3f}  (see {os.path.join(out_dir, 'kuramoto.png')})")
         extra = globals().get("_KURAMOTO_SWEEP", {"pyramid_shaft_sweep": None})
         sweep_vals = _parse_float_list(extra.get("pyramid_shaft_sweep"))
@@ -2373,6 +2468,9 @@ def main() -> int:
     parser.add_argument("--kuramoto-mass", type=float, default=None, help="Kuramoto: inertia mass (second-order).")
     parser.add_argument("--kuramoto-damping", type=float, default=None, help="Kuramoto: damping gamma (second-order).")
     parser.add_argument("--pyramid-shaft-sweep", type=str, default=None, help="Kuramoto: sweep air_shaft weights (comma-separated).")
+    parser.add_argument("--kuramoto-fft", action="store_true", help="Kuramoto: write FFT of r(t).")
+    parser.add_argument("--kuramoto-phase-pairs", type=str, default=None, help="Kuramoto: phase portrait pairs (e.g. 1-2,1-3).")
+    parser.add_argument("--kuramoto-label-nodes", action="store_true", help="Kuramoto: label nodes on final phase plot (if names available).")
     # CHSH (headless)
     parser.add_argument("--chsh-noise-sweep", action="store_true", help="CHSH: sweep noise values and write chsh_noise_sweep.png.")
     parser.add_argument("--chsh-ofm-n", type=int, default=20, help="CHSH: OFM N for scaling.")
@@ -2464,6 +2562,12 @@ def main() -> int:
             _KURAMOTO_HEADLESS_CFG = kcfg
             global _KURAMOTO_SWEEP  # noqa: PLW0603
             _KURAMOTO_SWEEP = {"pyramid_shaft_sweep": args.pyramid_shaft_sweep}
+            global _KURAMOTO_EXTRA  # noqa: PLW0603
+            _KURAMOTO_EXTRA = {
+                "fft": bool(args.kuramoto_fft),
+                "phase_pairs": args.kuramoto_phase_pairs,
+                "label_nodes": bool(args.kuramoto_label_nodes),
+            }
 
         if args.mode in ("chsh", "all"):
             ccfg = CHSHConfig(n_ofm=int(args.chsh_ofm_n), fractal_noise=0.0, seed=1)

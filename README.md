@@ -207,6 +207,13 @@ py .\app.py --nogui --mode kuramoto --out outputs --kuramoto-topology pyramid `
   --pyramid-shaft-sweep "0.8,0.9,1.0,1.1,1.2,1.3,1.4"
 ```
 
+Breathing analysis helpers:
+
+```powershell
+py .\app.py --nogui --mode kuramoto --out outputs --kuramoto-topology pyramid `
+  --kuramoto-fft --kuramoto-phase-pairs "1-2,1-3" --kuramoto-label-nodes
+```
+
 ## Notes
 
 ## Phase 1: Cantor tunneling sweep + log-log fit
