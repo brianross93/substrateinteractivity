@@ -4,7 +4,7 @@ import os
 import random
 import sys
 import csv
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from typing import Optional
 
 import matplotlib
@@ -32,6 +32,41 @@ import networkx as nx
 import numpy as np
 from scipy.integrate import solve_ivp
 from scipy.linalg import expm
+
+CONSCIOUSNESS_FREQS = {
+    # Pyramid-validated (as commonly cited in the framework)
+    "schumann": 7.83,
+    "schumann_giza": 8.1,
+    "kings_chamber": 16.2,
+    "infrasound": 5.0,
+    "f_sharp": 117.0,
+    "sarcophagus": 438.0,
+    "altered_state": 110.0,
+    # From existing framework / references
+    "or_timescale": 6.25,
+    "theta": 8.0,
+    "gamma": 40.0,
+    "bandyopadhyay": 111.0,
+}
+
+
+def kings_chamber_eigenfreqs(max_mode: int = 10, c: float = 343.0) -> list[dict]:
+    """
+    Acoustic eigenfrequencies for a rectangular cavity (Kings Chamber).
+    Returns sorted modes with (n, m, k, freq_hz).
+    """
+    Lx, Ly, Lz = 10.47, 5.23, 5.81
+    modes = []
+    max_mode = max(1, int(max_mode))
+    for n in range(max_mode):
+        for m in range(max_mode):
+            for k in range(max_mode):
+                if n + m + k == 0:
+                    continue
+                freq = (float(c) / 2.0) * math.sqrt((n / Lx) ** 2 + (m / Ly) ** 2 + (k / Lz) ** 2)
+                modes.append({"n": n, "m": m, "k": k, "freq_hz": float(freq)})
+    modes.sort(key=lambda x: x["freq_hz"])
+    return modes
 
 
 def ordered_factorizations_upto(n_max: int) -> np.ndarray:
@@ -406,6 +441,23 @@ def build_giza_pyramid_graph(scale_m: float, shaft_weight: float, medium_weights
     return g
 
 
+def build_giza_pyramid_graph_v2(scale_m: float, shaft_weight: float, medium_weights: dict) -> nx.Graph:
+    """
+    Enhanced pyramid topology with resonant frequency annotations.
+    """
+    g = build_giza_pyramid_graph(scale_m, shaft_weight, medium_weights)
+    chamber_freqs = {
+        "Kings Chamber": {"primary": 117.0, "secondary": 438.0, "infrasound": 16.2},
+        "Queens Chamber": {"primary": 110.0},
+        "Subterranean Chamber": {"primary": 5.0},
+        "Grand Gallery": {"primary": 16.0},
+    }
+    for name, freqs in chamber_freqs.items():
+        if name in g.nodes:
+            g.nodes[name]["resonant_freqs"] = freqs
+    return g
+
+
 def build_kuramoto_coupling(cfg: KuramotoConfig) -> tuple[np.ndarray, np.ndarray, nx.Graph]:
     topo = str(cfg.topology).lower().strip()
     if topo == "ofm":
@@ -437,12 +489,68 @@ def build_kuramoto_coupling(cfg: KuramotoConfig) -> tuple[np.ndarray, np.ndarray
         if cfg.pyramid_nodes_csv and cfg.pyramid_edges_csv:
             g = build_pyramid_graph_from_csv(cfg.pyramid_nodes_csv, cfg.pyramid_edges_csv, cfg.pyramid_scale_m, medium_weights)
         else:
-            g = build_giza_pyramid_graph(cfg.pyramid_scale_m, cfg.pyramid_shaft_weight, medium_weights)
+            g = build_giza_pyramid_graph_v2(cfg.pyramid_scale_m, cfg.pyramid_shaft_weight, medium_weights)
         k = build_graph_coupling_matrix(g, cfg.j_strength)
         f = np.zeros(len(g.nodes()) + 1, dtype=np.int64)
         return f, k, g
 
     raise ValueError("Unknown topology. Use: ofm | torus | metatron | pyramid")
+
+
+def _prepare_kuramoto(
+    cfg: KuramotoConfig,
+    coupling: Optional[tuple[np.ndarray, np.ndarray, nx.Graph]] = None,
+    omega_override: Optional[np.ndarray] = None,
+) -> tuple[np.ndarray, np.ndarray, nx.Graph, np.ndarray, np.ndarray]:
+    rng = np.random.default_rng(cfg.seed)
+    if coupling is None:
+        f, k, g = build_kuramoto_coupling(cfg)
+    else:
+        f, k, g = coupling
+    n = k.shape[0]
+    theta0 = rng.uniform(0.0, 2.0 * np.pi, size=(n,))
+    if omega_override is not None:
+        omega = np.asarray(omega_override, dtype=np.float64)
+        if omega.shape != (n,):
+            raise ValueError(f"omega_override must have shape ({n},)")
+    else:
+        omega = rng.normal(cfg.omega_mean, cfg.omega_std, size=(n,))
+    return f, k, g, theta0, omega
+
+
+def _run_kuramoto_core(
+    cfg: KuramotoConfig, k: np.ndarray, theta0: np.ndarray, omega: np.ndarray
+) -> tuple[np.ndarray, np.ndarray, Optional[np.ndarray], np.ndarray]:
+    if str(cfg.model).lower().strip() == "second":
+        t, theta_t, vel_t, r_t = run_kuramoto_second_order(theta0, omega, k, cfg)
+        omega_t = vel_t
+    else:
+        t_eval = np.arange(0.0, cfg.t_end + cfg.dt, cfg.dt)
+        # ODE solver tolerances:
+        # ----------------------
+        # rtol=1e-6, atol=1e-8 are conservative choices for phase dynamics.
+        # - Phases θ are O(1) to O(10) over typical runs, so atol=1e-8 ensures
+        #   absolute errors are negligible compared to phase wrapping (2π).
+        # - rtol=1e-6 keeps relative errors below 0.0001%, well within visual
+        #   and statistical accuracy for order parameter r(t).
+        # - RK45 (adaptive Runge-Kutta) is appropriate for smooth, non-stiff ODEs.
+        #
+        # These tolerances validated by comparing r_final across rtol=1e-4 to 1e-8:
+        # variations are <0.001, confirming convergence.
+        sol = solve_ivp(
+            fun=lambda t, y: kuramoto_rhs(t, y, omega=omega, k=k),
+            t_span=(0.0, cfg.t_end),
+            y0=theta0,
+            t_eval=t_eval,
+            method="RK45",
+            rtol=1e-6,
+            atol=1e-8,
+        )
+        t = sol.t
+        theta_t = sol.y  # (N, T)
+        r_t = kuramoto_order_parameter(theta_t)
+        omega_t = None
+    return t, theta_t, omega_t, r_t
 
 
 def run_kuramoto_second_order(theta0: np.ndarray, omega0: np.ndarray, k: np.ndarray, cfg: KuramotoConfig) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
@@ -475,44 +583,40 @@ def run_kuramoto_second_order(theta0: np.ndarray, omega0: np.ndarray, k: np.ndar
     return sol.t, theta_t, vel_t, r_t
 
 
-def run_kuramoto(cfg: KuramotoConfig) -> dict:
-    rng = np.random.default_rng(cfg.seed)
+def run_kuramoto(cfg: KuramotoConfig, omega_override: Optional[np.ndarray] = None) -> dict:
+    f, k, g, theta0, omega = _prepare_kuramoto(cfg, coupling=None, omega_override=omega_override)
+    t, theta_t, omega_t, r_t = _run_kuramoto_core(cfg, k, theta0, omega)
+    return {
+        "t": t,
+        "theta": theta_t,
+        "r": r_t,
+        "omega": omega,
+        "omega_t": omega_t,
+        "F": f,
+        "K": k,
+        "graph": g,
+        "topology": str(cfg.topology),
+        "model": str(cfg.model),
+    }
+
+
+def run_kuramoto_pyramid_resonance(cfg: KuramotoConfig) -> dict:
+    """
+    Kuramoto where each node's natural frequency is set by its chamber resonance (Hz -> rad/s).
+    """
     f, k, g = build_kuramoto_coupling(cfg)
     n = k.shape[0]
-
-    theta0 = rng.uniform(0.0, 2.0 * np.pi, size=(n,))
-    omega = rng.normal(cfg.omega_mean, cfg.omega_std, size=(n,))
-
-    if str(cfg.model).lower().strip() == "second":
-        t, theta_t, vel_t, r_t = run_kuramoto_second_order(theta0, omega, k, cfg)
-        omega_t = vel_t
-    else:
-        t_eval = np.arange(0.0, cfg.t_end + cfg.dt, cfg.dt)
-        # ODE solver tolerances:
-        # ----------------------
-        # rtol=1e-6, atol=1e-8 are conservative choices for phase dynamics.
-        # - Phases θ are O(1) to O(10) over typical runs, so atol=1e-8 ensures
-        #   absolute errors are negligible compared to phase wrapping (2π).
-        # - rtol=1e-6 keeps relative errors below 0.0001%, well within visual
-        #   and statistical accuracy for order parameter r(t).
-        # - RK45 (adaptive Runge-Kutta) is appropriate for smooth, non-stiff ODEs.
-        #
-        # These tolerances validated by comparing r_final across rtol=1e-4 to 1e-8:
-        # variations are <0.001, confirming convergence.
-        sol = solve_ivp(
-            fun=lambda t, y: kuramoto_rhs(t, y, omega=omega, k=k),
-            t_span=(0.0, cfg.t_end),
-            y0=theta0,
-            t_eval=t_eval,
-            method="RK45",
-            rtol=1e-6,
-            atol=1e-8,
-        )
-        t = sol.t
-        theta_t = sol.y  # (N, T)
-        r_t = kuramoto_order_parameter(theta_t)
-        omega_t = None
-
+    node_order = list(g.graph.get("node_order", g.nodes()))
+    omega = np.zeros(n, dtype=np.float64)
+    for i, node in enumerate(node_order):
+        freqs = g.nodes[node].get("resonant_freqs", {}) if isinstance(g, nx.Graph) else {}
+        primary_hz = freqs.get("primary", None) if isinstance(freqs, dict) else None
+        if primary_hz is None:
+            omega[i] = float(cfg.omega_mean)
+        else:
+            omega[i] = 2.0 * math.pi * float(primary_hz)
+    f, k, g, theta0, omega = _prepare_kuramoto(cfg, coupling=(f, k, g), omega_override=omega)
+    t, theta_t, omega_t, r_t = _run_kuramoto_core(cfg, k, theta0, omega)
     return {
         "t": t,
         "theta": theta_t,
@@ -559,6 +663,45 @@ def save_kuramoto_shaft_weight_sweep(out_dir: str, cfg: KuramotoConfig, weights:
     ax.grid(True, alpha=0.3)
     fig.tight_layout()
     plot_path = os.path.join(out_dir, "kuramoto_pyramid_shaft_sweep.png")
+    fig.savefig(plot_path, dpi=150)
+    plt.close(fig)
+    return csv_path
+
+
+def save_kuramoto_freq_sweep(out_dir: str, cfg: KuramotoConfig, target_freqs: list[float]) -> str:
+    """
+    Sweep target frequencies (Hz) and measure final synchronization r.
+    """
+    freqs = [float(f) for f in target_freqs if float(f) >= 0.0]
+    if not freqs:
+        raise ValueError("frequency sweep requires at least one non-negative frequency.")
+
+    results = []
+    for freq in freqs:
+        omega_mean = 2.0 * math.pi * float(freq)
+        omega_std = float(cfg.omega_std) if omega_mean <= 0.0 else (0.1 * omega_mean)
+        sweep_cfg = replace(cfg, omega_mean=omega_mean, omega_std=omega_std)
+        out = run_kuramoto(sweep_cfg)
+        r_final = float(out["r"][-1])
+        results.append((float(freq), float(omega_mean), float(omega_std), float(r_final)))
+
+    csv_path = os.path.join(out_dir, "kuramoto_freq_sweep.csv")
+    with open(csv_path, "w", newline="", encoding="utf-8") as f:
+        w = csv.writer(f)
+        w.writerow(["freq_hz", "omega_mean", "omega_std", "r_final"])
+        for row in results:
+            w.writerow(list(row))
+
+    fig, ax = plt.subplots(figsize=(8.5, 4.5))
+    xs = [r[0] for r in results]
+    ys = [r[3] for r in results]
+    ax.plot(xs, ys, marker="o", lw=2)
+    ax.set_xlabel("frequency (Hz)")
+    ax.set_ylabel("r_final")
+    ax.set_title("Kuramoto r_final vs target frequency")
+    ax.grid(True, alpha=0.3)
+    fig.tight_layout()
+    plot_path = os.path.join(out_dir, "kuramoto_freq_sweep.png")
     fig.savefig(plot_path, dpi=150)
     plt.close(fig)
     return csv_path
@@ -746,9 +889,18 @@ def _ensure_dir(path: str) -> None:
     os.makedirs(path, exist_ok=True)
 
 
-def save_kuramoto_plot(out_dir: str, cfg: KuramotoConfig, extra: Optional[dict] = None) -> float:
+def save_kuramoto_plot(
+    out_dir: str,
+    cfg: KuramotoConfig,
+    extra: Optional[dict] = None,
+    omega_override: Optional[np.ndarray] = None,
+    use_pyramid_resonance: bool = False,
+) -> float:
     extra = extra or {}
-    out = run_kuramoto(cfg)
+    if use_pyramid_resonance:
+        out = run_kuramoto_pyramid_resonance(cfg)
+    else:
+        out = run_kuramoto(cfg, omega_override=omega_override)
     t = out["t"]
     r = out["r"]
     theta = out["theta"]
@@ -1002,13 +1154,17 @@ def headless_main(mode: str, out_dir: str, barrier: str) -> int:
     if mode in ("kuramoto", "both", "all"):
         kcfg = globals().get("_KURAMOTO_HEADLESS_CFG", KuramotoConfig())
         kextra = globals().get("_KURAMOTO_EXTRA", {})
-        final_r = save_kuramoto_plot(out_dir, kcfg, extra=kextra)
+        final_r = save_kuramoto_plot(out_dir, kcfg, extra=kextra, use_pyramid_resonance=bool(kextra.get("pyramid_resonance")))
         print(f"[kuramoto] final r = {final_r:.3f}  (see {os.path.join(out_dir, 'kuramoto.png')})")
         extra = globals().get("_KURAMOTO_SWEEP", {"pyramid_shaft_sweep": None})
         sweep_vals = _parse_float_list(extra.get("pyramid_shaft_sweep"))
         if sweep_vals:
             csv_path = save_kuramoto_shaft_weight_sweep(out_dir, kcfg, sweep_vals)
             print(f"[kuramoto] wrote {csv_path} and kuramoto_pyramid_shaft_sweep.png")
+        freq_vals = _parse_float_list(extra.get("freq_sweep"))
+        if freq_vals:
+            csv_path = save_kuramoto_freq_sweep(out_dir, kcfg, freq_vals)
+            print(f"[kuramoto] wrote {csv_path} and kuramoto_freq_sweep.png")
     if mode in ("kuramoto_anim",):
         kcfg = globals().get("_KURAMOTO_HEADLESS_CFG", KuramotoConfig())
         out_path = save_kuramoto_animation(out_dir, kcfg)
@@ -2455,6 +2611,7 @@ def main() -> int:
     parser.add_argument("--torus-m", type=int, default=None, help="Kuramoto: torus grid size m (N=m*m).")
     parser.add_argument("--kuramoto-n", type=int, default=None, help="Kuramoto: N (only used for topology=ofm).")
     parser.add_argument("--kuramoto-j", type=float, default=None, help="Kuramoto: coupling strength J.")
+    parser.add_argument("--kuramoto-omega-mean", type=float, default=None, help="Kuramoto: omega_mean (mean frequency).")
     parser.add_argument("--kuramoto-omega-std", type=float, default=None, help="Kuramoto: omega_std (spread).")
     parser.add_argument("--kuramoto-t-end", type=float, default=None, help="Kuramoto: simulation end time.")
     parser.add_argument("--kuramoto-dt", type=float, default=None, help="Kuramoto: output dt.")
@@ -2471,6 +2628,8 @@ def main() -> int:
     parser.add_argument("--kuramoto-fft", action="store_true", help="Kuramoto: write FFT of r(t).")
     parser.add_argument("--kuramoto-phase-pairs", type=str, default=None, help="Kuramoto: phase portrait pairs (e.g. 1-2,1-3).")
     parser.add_argument("--kuramoto-label-nodes", action="store_true", help="Kuramoto: label nodes on final phase plot (if names available).")
+    parser.add_argument("--kuramoto-pyramid-resonance", action="store_true", help="Kuramoto: set omega by pyramid chamber resonances.")
+    parser.add_argument("--kuramoto-freq-sweep", type=str, default=None, help="Kuramoto: sweep target freqs in Hz (comma-separated).")
     # CHSH (headless)
     parser.add_argument("--chsh-noise-sweep", action="store_true", help="CHSH: sweep noise values and write chsh_noise_sweep.png.")
     parser.add_argument("--chsh-ofm-n", type=int, default=20, help="CHSH: OFM N for scaling.")
@@ -2486,30 +2645,28 @@ def main() -> int:
         if args.mode in ("retro", "all"):
             cfg = RetroConfig()
             if args.retro_theta is not None:
-                cfg = RetroConfig(**{**cfg.__dict__, "theta_deg": float(args.retro_theta)})
+                cfg = replace(cfg, theta_deg=float(args.retro_theta))
             if args.retro_omega is not None:
-                cfg = RetroConfig(**{**cfg.__dict__, "omega": float(args.retro_omega)})
+                cfg = replace(cfg, omega=float(args.retro_omega))
             if args.retro_t2 is not None:
-                cfg = RetroConfig(**{**cfg.__dict__, "t2": float(args.retro_t2)})
+                cfg = replace(cfg, t2=float(args.retro_t2))
             if args.retro_dt is not None:
-                cfg = RetroConfig(**{**cfg.__dict__, "dt": float(args.retro_dt)})
+                cfg = replace(cfg, dt=float(args.retro_dt))
             if args.retro_strobe is not None:
-                cfg = RetroConfig(**{**cfg.__dict__, "strobe_every_n_steps": int(args.retro_strobe)})
+                cfg = replace(cfg, strobe_every_n_steps=int(args.retro_strobe))
             if bool(args.retro_switch):
-                cfg = RetroConfig(**{**cfg.__dict__, "use_switch": True})
+                cfg = replace(cfg, use_switch=True)
             if bool(args.retro_switch_post):
-                cfg = RetroConfig(**{**cfg.__dict__, "use_switch": True, "switch_cptp": False})
+                cfg = replace(cfg, use_switch=True, switch_cptp=False)
             if args.retro_switch_phase is not None:
-                cfg = RetroConfig(**{**cfg.__dict__, "switch_phase_deg": float(args.retro_switch_phase)})
+                cfg = replace(cfg, switch_phase_deg=float(args.retro_switch_phase))
             if bool(args.retro_ofm):
-                cfg = RetroConfig(
-                    **{
-                        **cfg.__dict__,
-                        "ofm_modulate": True,
-                        "ofm_n": int(args.retro_ofm_n),
-                        "ofm_strength_deg": float(args.retro_ofm_strength_deg),
-                        "ofm_target": str(args.retro_ofm_target),
-                    }
+                cfg = replace(
+                    cfg,
+                    ofm_modulate=True,
+                    ofm_n=int(args.retro_ofm_n),
+                    ofm_strength_deg=float(args.retro_ofm_strength_deg),
+                    ofm_target=str(args.retro_ofm_target),
                 )
             # stash into globals for headless_main to pick up via defaults (simple approach)
             global _RETRO_HEADLESS_CFG  # noqa: PLW0603
@@ -2527,46 +2684,49 @@ def main() -> int:
         if args.mode in ("kuramoto", "both", "all", "kuramoto_anim"):
             kcfg = KuramotoConfig()
             if args.kuramoto_topology is not None:
-                kcfg = KuramotoConfig(**{**kcfg.__dict__, "topology": str(args.kuramoto_topology)})
+                kcfg = replace(kcfg, topology=str(args.kuramoto_topology))
             if args.torus_m is not None:
-                kcfg = KuramotoConfig(**{**kcfg.__dict__, "torus_m": int(args.torus_m)})
+                kcfg = replace(kcfg, torus_m=int(args.torus_m))
             if args.kuramoto_n is not None:
-                kcfg = KuramotoConfig(**{**kcfg.__dict__, "n": int(args.kuramoto_n)})
+                kcfg = replace(kcfg, n=int(args.kuramoto_n))
             if args.kuramoto_j is not None:
-                kcfg = KuramotoConfig(**{**kcfg.__dict__, "j_strength": float(args.kuramoto_j)})
+                kcfg = replace(kcfg, j_strength=float(args.kuramoto_j))
+            if args.kuramoto_omega_mean is not None:
+                kcfg = replace(kcfg, omega_mean=float(args.kuramoto_omega_mean))
             if args.kuramoto_omega_std is not None:
-                kcfg = KuramotoConfig(**{**kcfg.__dict__, "omega_std": float(args.kuramoto_omega_std)})
+                kcfg = replace(kcfg, omega_std=float(args.kuramoto_omega_std))
             if args.kuramoto_t_end is not None:
-                kcfg = KuramotoConfig(**{**kcfg.__dict__, "t_end": float(args.kuramoto_t_end)})
+                kcfg = replace(kcfg, t_end=float(args.kuramoto_t_end))
             if args.kuramoto_dt is not None:
-                kcfg = KuramotoConfig(**{**kcfg.__dict__, "dt": float(args.kuramoto_dt)})
+                kcfg = replace(kcfg, dt=float(args.kuramoto_dt))
             if args.kuramoto_seed is not None:
-                kcfg = KuramotoConfig(**{**kcfg.__dict__, "seed": int(args.kuramoto_seed)})
+                kcfg = replace(kcfg, seed=int(args.kuramoto_seed))
             if args.pyramid_scale_m is not None:
-                kcfg = KuramotoConfig(**{**kcfg.__dict__, "pyramid_scale_m": float(args.pyramid_scale_m)})
+                kcfg = replace(kcfg, pyramid_scale_m=float(args.pyramid_scale_m))
             if args.pyramid_shaft_weight is not None:
-                kcfg = KuramotoConfig(**{**kcfg.__dict__, "pyramid_shaft_weight": float(args.pyramid_shaft_weight)})
+                kcfg = replace(kcfg, pyramid_shaft_weight=float(args.pyramid_shaft_weight))
             if args.pyramid_medium_weights is not None:
-                kcfg = KuramotoConfig(**{**kcfg.__dict__, "pyramid_medium_weights": str(args.pyramid_medium_weights)})
+                kcfg = replace(kcfg, pyramid_medium_weights=str(args.pyramid_medium_weights))
             if args.pyramid_nodes_csv is not None:
-                kcfg = KuramotoConfig(**{**kcfg.__dict__, "pyramid_nodes_csv": str(args.pyramid_nodes_csv)})
+                kcfg = replace(kcfg, pyramid_nodes_csv=str(args.pyramid_nodes_csv))
             if args.pyramid_edges_csv is not None:
-                kcfg = KuramotoConfig(**{**kcfg.__dict__, "pyramid_edges_csv": str(args.pyramid_edges_csv)})
+                kcfg = replace(kcfg, pyramid_edges_csv=str(args.pyramid_edges_csv))
             if args.kuramoto_model is not None:
-                kcfg = KuramotoConfig(**{**kcfg.__dict__, "model": str(args.kuramoto_model)})
+                kcfg = replace(kcfg, model=str(args.kuramoto_model))
             if args.kuramoto_mass is not None:
-                kcfg = KuramotoConfig(**{**kcfg.__dict__, "mass": float(args.kuramoto_mass)})
+                kcfg = replace(kcfg, mass=float(args.kuramoto_mass))
             if args.kuramoto_damping is not None:
-                kcfg = KuramotoConfig(**{**kcfg.__dict__, "damping": float(args.kuramoto_damping)})
+                kcfg = replace(kcfg, damping=float(args.kuramoto_damping))
             global _KURAMOTO_HEADLESS_CFG  # noqa: PLW0603
             _KURAMOTO_HEADLESS_CFG = kcfg
             global _KURAMOTO_SWEEP  # noqa: PLW0603
-            _KURAMOTO_SWEEP = {"pyramid_shaft_sweep": args.pyramid_shaft_sweep}
+            _KURAMOTO_SWEEP = {"pyramid_shaft_sweep": args.pyramid_shaft_sweep, "freq_sweep": args.kuramoto_freq_sweep}
             global _KURAMOTO_EXTRA  # noqa: PLW0603
             _KURAMOTO_EXTRA = {
                 "fft": bool(args.kuramoto_fft),
                 "phase_pairs": args.kuramoto_phase_pairs,
                 "label_nodes": bool(args.kuramoto_label_nodes),
+                "pyramid_resonance": bool(args.kuramoto_pyramid_resonance),
             }
 
         if args.mode in ("chsh", "all"):

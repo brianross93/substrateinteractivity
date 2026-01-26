@@ -74,3 +74,54 @@ right_mask = x > a/2
 T = np.sum(np.abs(psi[right_mask])**2 * dx)
 print(f"T: {T:.3f}")  # Matches paper ~0.082
 This simulates electron "alignment" by tuning E or phases—extend to fractals by making V a self-similar potential (e.g., Cantor-set barriers). For Kuramoto, a similar ODE solver could test synchronization with OFM distances.
+
+---
+
+## Kuramoto-Pyramid Investigation (Closed)
+
+### What We Tested
+Whether pyramid graph topology creates frequency-selective synchronization at consciousness-relevant frequencies (5, 7.83, 16.2, 40, 110–117 Hz).
+
+### Findings
+| Claim | Result | Status |
+| --- | --- | --- |
+| Pyramid topology shows frequency selectivity | Yes, but high variance | Weak support |
+| 117 Hz is a resonant peak | Seed-sensitive, not robust | Rejected |
+| 5 Hz / 16 Hz are resonant peaks | Inconsistent across seeds | Not supported |
+| Pyramid is more selective than OFM | OFM shows stronger selectivity | Rejected |
+| 7.83 Hz → 16/117 Hz transduction | No FFT evidence | Rejected |
+
+### Interpretation
+Kuramoto oscillators model coupling topology, not physical resonance. Pyramid frequency selectivity likely requires:
+- Acoustic cavity modes (geometry)
+- Material properties (impedance, piezoelectric response)
+- Wave propagation and interference
+
+Topology alone is insufficient to reproduce chamber resonances.
+
+---
+
+## Pivot: Acoustic Cavity Eigenfrequencies
+
+The Kings Chamber can be modeled as a rectangular acoustic cavity with rigid walls. The mode frequencies are:
+
+```
+f_nmk = (c/2) * sqrt((n/Lx)^2 + (m/Ly)^2 + (k/Lz)^2)
+```
+
+For Lx=10.47 m, Ly=5.23 m, Lz=5.81 m and c≈343 m/s:
+- The (1,0,0) mode is ~16.4 Hz (close to reported 16.2 Hz).
+- 117 Hz appears as higher modes (e.g., (7,0,0) or (0,0,4)).
+
+### Utility Function (in `app.py`)
+```python
+from app import kings_chamber_eigenfreqs
+
+modes = kings_chamber_eigenfreqs(max_mode=8)
+for mode in modes[:15]:
+    print(mode)
+```
+
+### Next Steps
+- Use eigenfrequency matching as the primary resonance test.
+- If needed, extend to a simplified 2D/3D acoustic FDTD using the Meep workflow for non-rectangular geometry.
